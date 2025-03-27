@@ -1,5 +1,5 @@
 Pod::Spec.new do |s|
-  s.name             = 'LinkLabSDK'
+  s.name             = 'Linklab'
   s.version          = '0.1.0'
   s.summary          = 'LinkLab deep linking service SDK for iOS'
   s.description      = 'LinkLab SDK for iOS provides deep linking services to handle universal links and custom URL schemes.'

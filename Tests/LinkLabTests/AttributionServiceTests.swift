@@ -1,5 +1,5 @@
 import XCTest
-@testable import LinkLabSDK
+@testable import Linklab
 
 final class AttributionServiceTests: XCTestCase {
     
