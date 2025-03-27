@@ -19,8 +19,8 @@ class AttributionService {
     private let baseURL: URL
     private let urlSession: URLSession
     
-    init(baseURL: URL, urlSession: URLSession = .shared) {
-        self.baseURL = baseURL
+    init(urlSession: URLSession = .shared) {
+        self.baseURL = URL(string: "https://linklab.cc")!
         self.urlSession = urlSession
     }
     

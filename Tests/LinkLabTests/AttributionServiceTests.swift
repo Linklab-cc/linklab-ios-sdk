@@ -18,11 +18,8 @@ final class AttributionServiceTests: XCTestCase {
         // Reset the mock data for each test
         MockURLProtocol.mockResponses = [:]
         
-        // Create the attribution service with a mock base URL and session
-        attributionService = AttributionService(
-            baseURL: URL(string: "https://api.linklab.cc")!,
-            urlSession: urlSession
-        )
+        // Create the attribution service with the mock session
+        attributionService = AttributionService(urlSession: urlSession)
     }
     
     override func tearDown() {
@@ -51,7 +48,7 @@ final class AttributionServiceTests: XCTestCase {
         let mockResponseData = try encoder.encode(linkData)
         
         // Configure the mock to respond to the attribution endpoint
-        let expectedURL = URL(string: "https://api.linklab.cc/apple-attribution")!
+        let expectedURL = URL(string: "https://linklab.cc/apple-attribution")!
         
         // Add Content-Type header to mock response
         let headers = ["Content-Type": "application/json"]

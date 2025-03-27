@@ -43,7 +43,6 @@ import Linklab
 func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
     // Initialize Linklab
     let config = Configuration(
-        attributionServiceURL: URL(string: "https://linklab.cc")!,
         debugLoggingEnabled: true
     )
     
@@ -98,13 +97,13 @@ func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
 
 ## Redirector Service Integration
 
-The Linklab iOS SDK is designed to work with the Linklab Redirector service according to its OpenAPI specification. The SDK implements the following endpoints:
+The Linklab iOS SDK works with the Linklab Redirector service at `https://linklab.cc` according to its OpenAPI specification. The API URL is hardcoded in the SDK, so you don't need to provide it during initialization.
 
 ### Apple Attribution Endpoint
 
 The SDK communicates with the `/apple-attribution` endpoint to process Apple attribution tokens for deferred deep linking:
 
-- **Endpoint**: POST /apple-attribution
+- **Endpoint**: POST https://linklab.cc/apple-attribution
 - **Request Body**: 
   ```json
   {

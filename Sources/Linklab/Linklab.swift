@@ -30,7 +30,7 @@ public class Linklab {
         
         self.installationTracker = InstallationTracker()
         if #available(macOS 12.0, *) {
-            self.attributionService = AttributionService(baseURL: config.attributionServiceURL)
+            self.attributionService = AttributionService()
         }
         self.universalLinkHandler = UniversalLinkHandler()
         self.deepLinkProcessor = DeepLinkProcessor()
