@@ -1,5 +1,5 @@
 import XCTest
-@testable import Linklab
+@testable import LinkLabSDK
 
 final class InstallationTrackerTests: XCTestCase {
     private let firstLaunchKey = "linklab_first_launch_key"

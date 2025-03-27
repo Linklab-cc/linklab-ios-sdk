@@ -1,5 +1,5 @@
 import XCTest
-@testable import Linklab
+@testable import LinkLabSDK
 
 final class DeepLinkProcessorTests: XCTestCase {
     private var deepLinkProcessor: DeepLinkProcessor!
