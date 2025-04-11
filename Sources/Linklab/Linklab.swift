@@ -13,23 +13,32 @@ public class Linklab {
     
     public static let shared = Linklab()
     
+    // Store configuration including custom domains
     private var configuration: Configuration?
+    private var configuredCustomDomains: Set<String> = [] // Set for efficient lookup
+    
     private var installationTracker: InstallationTracker?
     private var apiService: APIService?
     // Using Any type for macOS compatibility - will be downcast when used
     private var attributionService: Any?
     
-    private var deepLinkCallback: ((LinkDestination?) -> Void)?
+    // Callback now returns the full LinkData object
+    private var deepLinkCallback: ((LinkData?) -> Void)?
     
     private init() {}
     
     /// Initialize the Linklab SDK
     /// - Parameters:
     ///   - config: Configuration for the Linklab SDK
-    ///   - deepLinkCallback: Callback that will be called when a deep link is processed
-    public func initialize(with config: Configuration, deepLinkCallback: @escaping (LinkDestination?) -> Void) {
+    ///   - deepLinkCallback: Callback called when a deep link is processed, returning LinkData
+    public func initialize(with config: Configuration, deepLinkCallback: @escaping (LinkData?) -> Void) {
         self.configuration = config
         self.deepLinkCallback = deepLinkCallback
+        // Store custom domains in a Set for faster checking
+        self.configuredCustomDomains = Set(config.customDomains.map { $0.lowercased() })
+        if !configuredCustomDomains.isEmpty {
+             Logger.info("Initialized with custom domains: \(self.configuredCustomDomains.joined(separator: ", "))")
+        }
         
         self.installationTracker = InstallationTracker()
         self.apiService = APIService()
@@ -46,19 +55,23 @@ public class Linklab {
     /// - Returns: Boolean indicating whether the URL was identified as a LinkLab link and is being processed.
     @discardableResult
     public func handleIncomingURL(_ url: URL) -> Bool {
-        guard let host = url.host else {
+        guard let host = url.host?.lowercased() else { // Lowercase host for comparison
             Logger.debug("Incoming URL has no host: \(url.absoluteString)")
             return false
         }
 
-        // Check if it's a linklab.cc or a subdomain of linklab.cc
-        if host == Self.linklabHost || host.hasSuffix(".\(Self.linklabHost)") {
-            Logger.debug("Handling LinkLab URL: \(url.absoluteString)")
-            processIncomingURL(url)
+        // Check if the host matches LinkLab domains or configured custom domains
+        let isLinkLabDomain = host == Self.linklabHost || host.hasSuffix(".\(Self.linklabHost)")
+        let isCustomDomain = configuredCustomDomains.contains(host)
+        
+        if isLinkLabDomain || isCustomDomain {
+            let domainSource = isCustomDomain ? "custom domain" : "LinkLab domain"
+            Logger.debug("Handling URL from \(domainSource): \(url.absoluteString)")
+            processIncomingURL(url, host: host) // Pass the already lowercased host
             return true // Indicate that we are processing this URL
         } else {
-            Logger.debug("URL is not a LinkLab URL: \(url.absoluteString)")
-            return false // Not a LinkLab URL
+            Logger.debug("URL host '\(host)' does not match LinkLab or custom domains.")
+            return false // Not a LinkLab URL or configured custom domain
         }
     }
 
@@ -84,16 +97,12 @@ public class Linklab {
     // MARK: - Private Methods
     
     /// Checks if the URL is a LinkLab URL and initiates fetching details if it is.
-    private func processIncomingURL(_ url: URL) {
+    /// - Parameter url: The incoming URL.
+    /// - Parameter host: The lowercased host extracted from the URL.
+    private func processIncomingURL(_ url: URL, host: String) {
         guard let apiService = apiService else {
             Logger.error("Linklab not initialized or APIService is missing.")
             notifyCallback(with: nil, error: LinkError.notInitialized)
-            return
-        }
-
-        guard let host = url.host else {
-            Logger.error("Cannot process URL without a host: \(url.absoluteString)")
-            notifyCallback(with: nil, error: LinkError.invalidURL("URL has no host."))
             return
         }
 
@@ -105,26 +114,34 @@ public class Linklab {
              return
         }
 
-        // Determine domain type
-        let domainType = (host == Self.linklabHost) ? "rootDomain" : "subDomain"
-        let domain = host
+        // Determine domain type based on the host
+        let domainType: String
+        if host == Self.linklabHost {
+            domainType = "rootDomain"
+        } else if host.hasSuffix(".\(Self.linklabHost)") {
+            domainType = "subDomain"
+        } else {
+            // If it passed handleIncomingURL check and is not root/sub, it must be custom
+            domainType = "customDomain"
+        }
+
+        let domain = host // Use the already lowercased host
 
         Logger.debug("Extracted LinkID: \(linkId), DomainType: \(domainType), Domain: \(domain)")
 
         // Call the API service to fetch link details
         apiService.fetchLinkDetails(linkId: linkId, domainType: domainType, domain: domain) { [weak self] result in
-             DispatchQueue.main.async { // Ensure callback is on the main thread
+             // Hop back to main actor for UI updates / callback
+             Task { @MainActor [weak self] in
+                 guard let self = self else { return }
                  switch result {
                  case .success(let linkData):
                       Logger.info("Successfully fetched link data for ID \(linkId)")
-                      // Convert LinkData to LinkDestination
-                      // Use the fullLink string as the route and extract parameters
-                      let (route, params) = self?.extractRouteAndParams(from: linkData.fullLink) ?? (linkData.fullLink, [:])
-                      let destination = LinkDestination(route: route, parameters: params)
-                      self?.notifyCallback(with: destination)
+                      // Pass the full LinkData object to the callback
+                      self.notifyCallback(with: linkData)
                  case .failure(let error):
                       Logger.error("Failed to fetch link details for ID \(linkId): \(error.localizedDescription)")
-                      self?.notifyCallback(with: nil, error: error)
+                      self.notifyCallback(with: nil, error: error)
                  }
              }
         }
@@ -137,8 +154,9 @@ public class Linklab {
         }
         
         if #available(macOS 12.0, *) {
-            guard let attributionService = attributionService as? AttributionService else {
-                 Logger.debug("AttributionService not available.")
+            // Check if the service exists and is the correct type, don't need the value here.
+            guard self.attributionService is AttributionService else {
+                 Logger.debug("AttributionService not available or wrong type initially.")
                 return
             }
         
@@ -155,17 +173,15 @@ public class Linklab {
                  }
                  
                  // Task runs detached from MainActor
-                 Task { 
-                     // No need to capture self weakly here if we hop back explicitly later
-                     // Or keep it weak if preferred for memory management, but MainActor hop is key
-                     
+                 // Capture the non-optional 'attributionService' constant defined above
+                 Task { [attributionService] in 
                      do {
                           Logger.debug("Requesting AdServices attribution token...")
                          // The attributionToken() method is not async in AdServices
                          let token = try AdServices.AAAttribution.attributionToken()
                           Logger.debug("Received AdServices attribution token.")
                          
-                         // Send token to attribution service - fetchDeferredDeepLink is async
+                         // Send token to attribution service - use the captured 'attributionService'
                           try await attributionService.fetchDeferredDeepLink(token: token) { result in
                               // Completion handler may run on any thread. Hop back to MainActor.
                               Task { @MainActor [weak self] in // Explicitly run callback logic on MainActor
@@ -173,10 +189,8 @@ public class Linklab {
                                   switch result {
                                   case .success(let linkData): 
                                        Logger.info("Successfully fetched deferred link data.")
-                                       // Convert LinkData to LinkDestination - safe on MainActor
-                                        let (route, params) = self.extractRouteAndParams(from: linkData.fullLink)
-                                        let destination = LinkDestination(route: route, parameters: params)
-                                        self.notifyCallback(with: destination) // Safe on MainActor
+                                       // Pass the full LinkData object to the callback
+                                       self.notifyCallback(with: linkData) // Safe on MainActor
                                   case .failure(let error):
                                        Logger.error("Failed to fetch deferred deep link: \(error.localizedDescription)")
                                        self.notifyCallback(with: nil, error: error) // Safe on MainActor
@@ -205,38 +219,23 @@ public class Linklab {
         }
     }
 
-    /// Helper function to extract route path and query parameters from a URL string.
-    private func extractRouteAndParams(from urlString: String) -> (route: String, params: [String: String]) {
-        guard let components = URLComponents(string: urlString) else {
-            Logger.error("Could not parse URL string to extract route and params: \(urlString)")
-            return (urlString, [:]) // Return original string if parsing fails
-        }
-        
-        let route = components.path
-        var params: [String: String] = [:]
-        
-        components.queryItems?.forEach { item in
-            params[item.name] = item.value ?? ""
-        }
-        
-        return (route, params)
-    }
-
     /// Helper to safely call the deep link callback on the main thread.
-    private func notifyCallback(with destination: LinkDestination? = nil, error: Error? = nil) {
+    private func notifyCallback(with linkData: LinkData? = nil, error: Error? = nil) {
         // Ensure execution on the main thread
         if Thread.isMainThread {
              if let error = error {
                   // Optionally, enhance LinkDestination or callback to include errors
                   Logger.error("Notifying callback with error: \(error.localizedDescription)")
-                  deepLinkCallback?(nil) // Or pass error info if callback signature changes
+                  deepLinkCallback?(nil) // Pass nil data on error
              } else {
-                  Logger.debug("Notifying callback with destination route: \(destination?.route ?? "nil"), params: \(destination?.parameters ?? [:])")
-                  deepLinkCallback?(destination)
+                  // Log relevant info from LinkData
+                  Logger.debug("Notifying callback with LinkData: id=\(linkData?.id ?? "nil"), fullLink=\(linkData?.fullLink ?? "nil")")
+                  deepLinkCallback?(linkData)
              }
         } else {
-            DispatchQueue.main.async { [weak self] in
-                self?.notifyCallback(with: destination, error: error)
+            // Ensure hopping back to main thread if called from background
+            Task { @MainActor [weak self] in
+                self?.notifyCallback(with: linkData, error: error)
             }
         }
     }
