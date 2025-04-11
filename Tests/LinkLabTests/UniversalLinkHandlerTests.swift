@@ -1,6 +1,7 @@
 import XCTest
 @testable import Linklab
 
+// Test class for UniversalLinkHandler
 final class UniversalLinkHandlerTests: XCTestCase {
     private var universalLinkHandler: UniversalLinkHandler!
     
@@ -48,6 +49,26 @@ final class UniversalLinkHandlerTests: XCTestCase {
         
         XCTAssertThrowsError(try universalLinkHandler.parseUniversalLink(url)) { error in
             XCTAssertEqual(error as? LinkError, .invalidLinkFormat)
+        }
+    }
+}
+
+// Mock API Service for testing - defined first so it can be used in test class
+class MockAPIService: APIService {
+    var mockResult: Result<LinkData, Error>?
+    var lastLinkId: String?
+    var lastDomain: String?
+    
+    override func fetchLinkDetails(linkId: String, domain: String, completion: @escaping (Result<LinkData, Error>) -> Void) {
+        // Record the parameters
+        self.lastLinkId = linkId
+        self.lastDomain = domain
+        
+        // Return the mock result
+        if let result = mockResult {
+            completion(result)
+        } else {
+            completion(.failure(LinkError.internalError("No mock result set")))
         }
     }
 }
