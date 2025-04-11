@@ -16,7 +16,7 @@ let package = Package(
             name: "Linklab",
             dependencies: []),
         .testTarget(
-            name: "LinkLabTests",
+            name: "LinklabTests",
             dependencies: ["Linklab"]),
     ]
 )
