@@ -15,8 +15,7 @@ public class Linklab {
     
     // Store configuration including custom domains
     private var configuration: Configuration?
-    private var configuredCustomDomains: Set<String> = [] // Set for efficient lookup
-    
+
     private var installationTracker: InstallationTracker?
     private var apiService: APIService?
     // Using Any type for macOS compatibility - will be downcast when used
@@ -34,11 +33,11 @@ public class Linklab {
     public func initialize(with config: Configuration, deepLinkCallback: @escaping (LinkData?) -> Void) {
         self.configuration = config
         self.deepLinkCallback = deepLinkCallback
-        // Store custom domains in a Set for faster checking
-        self.configuredCustomDomains = Set(config.customDomains.map { $0.lowercased() })
-        if !configuredCustomDomains.isEmpty {
-             Logger.info("Initialized with custom domains: \(self.configuredCustomDomains.joined(separator: ", "))")
-        }
+        // Removed initialization of configuredCustomDomains
+        // self.configuredCustomDomains = Set(config.customDomains.map { $0.lowercased() })
+        // if !configuredCustomDomains.isEmpty {
+        //      Logger.info("Initialized with custom domains: \(self.configuredCustomDomains.joined(separator: ", "))")
+        // }
         
         self.installationTracker = InstallationTracker()
         self.apiService = APIService()
@@ -57,22 +56,13 @@ public class Linklab {
     public func handleIncomingURL(_ url: URL) -> Bool {
         guard let host = url.host?.lowercased() else { // Lowercase host for comparison
             Logger.debug("Incoming URL has no host: \(url.absoluteString)")
-            return false
+            return false // Still need a host to proceed
         }
 
-        // Check if the host matches LinkLab domains or configured custom domains
-        let isLinkLabDomain = host == Self.linklabHost || host.hasSuffix(".\(Self.linklabHost)")
-        let isCustomDomain = configuredCustomDomains.contains(host)
-        
-        if isLinkLabDomain || isCustomDomain {
-            let domainSource = isCustomDomain ? "custom domain" : "LinkLab domain"
-            Logger.debug("Handling URL from \(domainSource): \(url.absoluteString)")
-            processIncomingURL(url, host: host) // Pass the already lowercased host
-            return true // Indicate that we are processing this URL
-        } else {
-            Logger.debug("URL host '\(host)' does not match LinkLab or custom domains.")
-            return false // Not a LinkLab URL or configured custom domain
-        }
+        // Removed domain validation checks. Assume any URL might be a LinkLab link.
+        Logger.debug("Processing potential LinkLab URL: \(url.absoluteString)")
+        processIncomingURL(url, host: host) // Pass the lowercased host
+        return true // Indicate that we are processing this URL
     }
 
     // MARK: - Deprecated Handlers (Kept for compatibility, redirect to new handler)
@@ -114,23 +104,13 @@ public class Linklab {
              return
         }
 
-        // Determine domain type based on the host
-        let domainType: String
-        if host == Self.linklabHost {
-            domainType = "rootDomain"
-        } else if host.hasSuffix(".\(Self.linklabHost)") {
-            domainType = "subDomain"
-        } else {
-            // If it passed handleIncomingURL check and is not root/sub, it must be custom
-            domainType = "customDomain"
-        }
-
+        // Domain is simply the host provided
         let domain = host // Use the already lowercased host
 
-        Logger.debug("Extracted LinkID: \(linkId), DomainType: \(domainType), Domain: \(domain)")
+        Logger.debug("Extracted LinkID: \(linkId), Domain: \(domain)")
 
-        // Call the API service to fetch link details
-        apiService.fetchLinkDetails(linkId: linkId, domainType: domainType, domain: domain) { [weak self] result in
+        // Call the API service to fetch link details - removed domainType parameter
+        apiService.fetchLinkDetails(linkId: linkId, domain: domain) { [weak self] result in
              // Hop back to main actor for UI updates / callback
              Task { @MainActor [weak self] in
                  guard let self = self else { return }

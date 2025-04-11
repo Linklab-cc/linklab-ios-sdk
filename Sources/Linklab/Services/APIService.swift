@@ -12,13 +12,9 @@ internal class APIService {
     /// Fetches the details for a specific LinkLab link.
     /// - Parameters:
     ///   - linkId: The unique identifier of the link.
-    ///   - domainType: The type of domain ("rootDomain" or "subDomain").
     ///   - domain: The specific domain associated with the link.
     ///   - completion: A closure called with the result of the API call.
-    func fetchLinkDetails(linkId: String,
-                          domainType: String?,
-                          domain: String?,
-                          completion: @escaping (Result<LinkData, Error>) -> Void) {
+    func fetchLinkDetails(linkId: String, domain: String, completion: @escaping (Result<LinkData, Error>) -> Void) {
         
         guard !linkId.isEmpty else {
             completion(.failure(LinkError.invalidParameters("Link ID cannot be empty.")))
@@ -27,17 +23,9 @@ internal class APIService {
         
         var components = URLComponents(url: baseURL.appendingPathComponent("links").appendingPathComponent(linkId), resolvingAgainstBaseURL: false)
         
-        var queryItems = [URLQueryItem]()
-        if let domainType = domainType, !domainType.isEmpty {
-            queryItems.append(URLQueryItem(name: "domain_type", value: domainType))
-        }
-        if let domain = domain, !domain.isEmpty {
-            queryItems.append(URLQueryItem(name: "domain", value: domain))
-        }
-        
-        if !queryItems.isEmpty {
-            components?.queryItems = queryItems
-        }
+        components?.queryItems = [
+            URLQueryItem(name: "domain", value: domain)
+        ]
         
         guard let url = components?.url else {
             completion(.failure(LinkError.internalError("Failed to construct API URL.")))
