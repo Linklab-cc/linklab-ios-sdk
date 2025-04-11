@@ -1,19 +1,5 @@
 import Foundation
 
-/// Model representing the Link response from the API
-struct LinkData: Codable {
-    let id: String
-    let fullLink: String
-    let createdAt: String
-    let updatedAt: String
-    let userId: String
-    let packageName: String?
-    let bundleId: String?
-    let appStoreId: String?
-    let domainType: String
-    let domain: String
-}
-
 @available(iOS 14.0, macOS 12.0, *)
 class AttributionService {
     private let baseURL: URL
@@ -27,11 +13,11 @@ class AttributionService {
     /// Fetches deferred deep link information from the attribution service
     /// - Parameters:
     ///   - token: Attribution token from StoreKit
-    ///   - completion: Completion handler with result
+    ///   - completion: Completion handler with result containing LinkData
     /// - Returns: Void
     func fetchDeferredDeepLink(
         token: String,
-        completion: @escaping (Result<[String: String], Error>) -> Void
+        completion: @escaping (Result<LinkData, Error>) -> Void
     ) async throws {
         // Build the URL with path for Apple attribution endpoint
         let url = baseURL.appendingPathComponent("apple-attribution")
@@ -49,69 +35,43 @@ class AttributionService {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         
         do {
+            Logger.debug("Fetching deferred deep link with token...")
             // Make the request
             let (data, response) = try await urlSession.data(for: request)
             
             // Check response status code
             guard let httpResponse = response as? HTTPURLResponse else {
+                Logger.error("Invalid response type received from attribution endpoint.")
                 throw LinkError.invalidResponse
             }
             
             guard 200..<300 ~= httpResponse.statusCode else {
-                throw LinkError.serverError(httpResponse.statusCode)
-            }
-            
-            // Parse the response according to Link schema from API spec
-            guard let linkData = try? JSONDecoder().decode(LinkData.self, from: data) else {
-                throw LinkError.invalidResponseData
-            }
-            
-            // Convert Link data to parameters
-            let params = self.convertLinkDataToParams(linkData)
-            
-            // Return the deep link parameters
-            completion(.success(params))
-        } catch {
-            completion(.failure(error))
-            throw error
-        }
-    }
-    
-    /// Converts LinkData to a dictionary of parameters for deep linking
-    /// - Parameter linkData: The Link data from the API
-    /// - Returns: Dictionary of parameters for deep linking
-    private func convertLinkDataToParams(_ linkData: LinkData) -> [String: String] {
-        var params: [String: String] = [:]
-        
-        // Add all required fields from link data
-        params["id"] = linkData.id
-        params["fullLink"] = linkData.fullLink
-        params["domainType"] = linkData.domainType
-        params["domain"] = linkData.domain
-        
-        // Add optional fields if present
-        if let packageName = linkData.packageName {
-            params["packageName"] = packageName
-        }
-        
-        if let bundleId = linkData.bundleId {
-            params["bundleId"] = bundleId
-        }
-        
-        if let appStoreId = linkData.appStoreId {
-            params["appStoreId"] = appStoreId
-        }
-        
-        // Extract any additional parameters from the fullLink
-        if let components = URLComponents(string: linkData.fullLink),
-           let queryItems = components.queryItems {
-            for item in queryItems {
-                if let value = item.value {
-                    params[item.name] = value
+                var errorMessage = "Attribution endpoint returned error: Status code \(httpResponse.statusCode)"
+                if let body = String(data: data, encoding: .utf8) {
+                     errorMessage += " Body: \(body)"
                 }
+                Logger.error(errorMessage)
+                throw LinkError.apiError(statusCode: httpResponse.statusCode, message: "Attribution endpoint error.")
             }
+            
+            // Parse the response using the main LinkData model
+            let decoder = JSONDecoder()
+            // Use the custom decoder with the specific date format from LinkData
+             guard let linkData = try? decoder.decode(LinkData.self, from: data) else {
+                Logger.error("Failed to decode LinkData from attribution endpoint.")
+                if let jsonString = String(data: data, encoding: .utf8) {
+                    Logger.error("Raw JSON response from attribution: \(jsonString)")
+                }
+                 throw LinkError.decodingError(NSError(domain: "LinklabSDK", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to decode LinkData from attribution endpoint."])) // Provide a specific error
+             }
+            
+            // Return the decoded LinkData object directly
+            Logger.debug("Successfully fetched and decoded deferred LinkData.")
+            completion(.success(linkData))
+        } catch {
+            Logger.error("Error during fetchDeferredDeepLink: \(error.localizedDescription)")
+            completion(.failure(error))
+            throw error // Re-throw to signal failure to the caller if needed
         }
-        
-        return params
     }
 }
