@@ -30,22 +30,29 @@ final class AttributionServiceTests: XCTestCase {
     }
     
     func testFetchDeferredDeepLink() async throws {
-        // Setup mock response data
-        let linkData = LinkData(
-            id: "abc123",
-            fullLink: "https://example.com/product?id=123&campaign=test",
-            createdAt: "2025-03-24T12:00:00Z",
-            updatedAt: "2025-03-24T12:00:00Z",
-            userId: "user123",
-            packageName: nil,
-            bundleId: "com.example.app",
-            appStoreId: "987654321",
-            domainType: "rootDomain",
-            domain: "linklab.cc"
-        )
+        // Create a date formatter for converting strings to dates
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         
-        let encoder = JSONEncoder()
-        let mockResponseData = try encoder.encode(linkData)
+        // Setup mock response data - using date objects now
+        let createdDate = dateFormatter.date(from: "2025-03-24T12:00:00Z")
+        let updatedDate = dateFormatter.date(from: "2025-03-24T12:00:00Z")
+        
+        // Create JSON data for response
+        let jsonDict: [String: Any] = [
+            "id": "abc123",
+            "fullLink": "https://example.com/product?id=123&campaign=test",
+            "createdAt": "2025-03-24T12:00:00Z",
+            "updatedAt": "2025-03-24T12:00:00Z",
+            "userId": "user123",
+            "packageName": NSNull(),
+            "bundleId": "com.example.app",
+            "appStoreId": "987654321",
+            "domainType": "rootDomain",
+            "domain": "linklab.cc"
+        ]
+        
+        let mockResponseData = try JSONSerialization.data(withJSONObject: jsonDict)
         
         // Configure the mock to respond to the attribution endpoint
         let expectedURL = URL(string: "https://linklab.cc/apple-attribution")!
@@ -68,14 +75,14 @@ final class AttributionServiceTests: XCTestCase {
         let expectation = XCTestExpectation(description: "Fetch deferred deep link")
         
         // Call the method under test
-        var resultParams: [String: String]?
+        var resultLinkData: LinkData?
         var resultError: Error?
         
         do {
             try await attributionService.fetchDeferredDeepLink(token: "test-token") { result in
                 switch result {
-                case .success(let params):
-                    resultParams = params
+                case .success(let linkData):
+                    resultLinkData = linkData
                 case .failure(let error):
                     resultError = error
                 }
@@ -91,31 +98,27 @@ final class AttributionServiceTests: XCTestCase {
         
         // Verify results
         XCTAssertNil(resultError, "Should not have an error")
-        XCTAssertNotNil(resultParams, "Should have parameters")
+        XCTAssertNotNil(resultLinkData, "Should have link data")
         
-        // Verify we have parameters returned
-        XCTAssertNotNil(resultParams)
-        XCTAssertGreaterThan(resultParams?.count ?? 0, 0)
+        // Verify link data fields
+        guard let linkData = resultLinkData else {
+            XCTFail("LinkData should not be nil")
+            return
+        }
         
-        // When a URL parameter has the same name as a Link property,
-        // our implementation will prefer the URL parameter.
-        // In this case, the URL parameter 'id=123' overrides the Link.id 'abc123'
-        
-        // Check for required parameters
-        XCTAssertNotNil(resultParams?["id"])
-        XCTAssertEqual(resultParams?["fullLink"], "https://example.com/product?id=123&campaign=test")
-        XCTAssertEqual(resultParams?["bundleId"], "com.example.app")
-        XCTAssertEqual(resultParams?["appStoreId"], "987654321")
-        
-        // Check that the URL query parameters were extracted
-        XCTAssertEqual(resultParams?["campaign"], "test")
+        XCTAssertEqual(linkData.id, "abc123")
+        XCTAssertEqual(linkData.fullLink, "https://example.com/product?id=123&campaign=test")
+        XCTAssertEqual(linkData.createdAt?.timeIntervalSince1970, createdDate?.timeIntervalSince1970)
+        XCTAssertEqual(linkData.updatedAt?.timeIntervalSince1970, updatedDate?.timeIntervalSince1970)
+        XCTAssertEqual(linkData.userId, "user123")
+        XCTAssertNil(linkData.packageName)
+        XCTAssertEqual(linkData.bundleId, "com.example.app")
+        XCTAssertEqual(linkData.appStoreId, "987654321")
+        XCTAssertEqual(linkData.domainType, "rootDomain")
+        XCTAssertEqual(linkData.domain, "linklab.cc")
         
         // Verify the request was made correctly
         XCTAssertTrue(MockURLProtocol.requestMade(to: expectedURL))
-        
-        // Skip request body verification in this test since we're using async/await
-        // In a real test, we might need a more advanced setup to capture the request body
-        // This test primarily verifies that the endpoint path and response processing are correct
     }
 }
 

@@ -26,6 +26,31 @@ public struct LinkData: Codable, Equatable {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds, .withDashSeparatorInDate, .withColonSeparatorInTime]
         return formatter
     }()
+    
+    // Standard initializer for creating LinkData instances in code/tests
+    public init(
+        id: String,
+        fullLink: String,
+        createdAt: Date?,
+        updatedAt: Date?,
+        userId: String,
+        packageName: String?,
+        bundleId: String?,
+        appStoreId: String?,
+        domainType: String,
+        domain: String
+    ) {
+        self.id = id
+        self.fullLink = fullLink
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.userId = userId
+        self.packageName = packageName
+        self.bundleId = bundleId
+        self.appStoreId = appStoreId
+        self.domainType = domainType
+        self.domain = domain
+    }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)

@@ -24,6 +24,9 @@ public class Linklab {
     // Callback now returns the full LinkData object
     private var deepLinkCallback: ((LinkData?) -> Void)?
     
+    // Store the most recent link data
+    private var currentLinkData: LinkData?
+    
     private init() {}
     
     /// Initialize the Linklab SDK
@@ -82,6 +85,12 @@ public class Linklab {
     /// Manually trigger processing of a deferred deep link
     public func processDeferredDeepLink() {
         checkForDeferredDeepLink()
+    }
+    
+    /// Get the most recently processed link data, if any
+    /// - Returns: The most recent LinkData or nil if no link has been processed
+    public func getLinkData() -> LinkData? {
+        return currentLinkData
     }
     
     // MARK: - Private Methods
@@ -208,6 +217,11 @@ public class Linklab {
                   Logger.error("Notifying callback with error: \(error.localizedDescription)")
                   deepLinkCallback?(nil) // Pass nil data on error
              } else {
+                  // Store the link data for later retrieval
+                  if let linkData = linkData {
+                      currentLinkData = linkData
+                  }
+                  
                   // Log relevant info from LinkData
                   Logger.debug("Notifying callback with LinkData: id=\(linkData?.id ?? "nil"), fullLink=\(linkData?.fullLink ?? "nil")")
                   deepLinkCallback?(linkData)
