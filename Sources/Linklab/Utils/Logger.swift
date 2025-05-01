@@ -25,6 +25,6 @@ public enum Logger {
     }
     
     private static func log(level: String, message: String) {
-        print("[Linklab] \(level): \(message)")
+        NSLog("[Linklab] \(level): \(message)")
     }
 }
