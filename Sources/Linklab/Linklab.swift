@@ -27,6 +27,9 @@ public class Linklab {
     // Store the most recent link data
     private var currentLinkData: LinkData?
     
+    // Store incoming URL if it arrives before initialization
+    private var pendingDeepLinkURL: URL?
+    
     private init() {}
     
     /// Initialize the Linklab SDK
@@ -50,6 +53,13 @@ public class Linklab {
         
         // Check for deferred deep link if this is a new installation
         checkForDeferredDeepLink()
+
+        // Process any pending deep link URL received before initialization
+        if let pendingURL = pendingDeepLinkURL {
+            Logger.debug("Processing pending deep link URL: \(pendingURL.absoluteString)")
+            handleIncomingURL(pendingURL) // Process the stored URL
+            self.pendingDeepLinkURL = nil // Clear the stored URL
+        }
     }
     
     /// Handle an incoming URL (Universal Link or Custom Scheme)
@@ -57,6 +67,13 @@ public class Linklab {
     /// - Returns: Boolean indicating whether the URL was identified as a LinkLab link and is being processed.
     @discardableResult
     public func handleIncomingURL(_ url: URL) -> Bool {
+        // Check if the SDK has been initialized
+        guard configuration != nil else {
+            Logger.info("SDK not yet initialized. Storing incoming URL for later processing: \(url.absoluteString)")
+            self.pendingDeepLinkURL = url
+            return true // Indicate that we will handle this URL later
+        }
+
         guard let host = url.host?.lowercased() else { // Lowercase host for comparison
             Logger.debug("Incoming URL has no host: \(url.absoluteString)")
             return false // Still need a host to proceed
