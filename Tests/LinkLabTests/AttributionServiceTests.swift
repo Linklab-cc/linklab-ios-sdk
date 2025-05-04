@@ -79,7 +79,7 @@ final class AttributionServiceTests: XCTestCase {
         var resultError: Error?
         
         do {
-            try await attributionService.fetchDeferredDeepLink(token: "test-token") { result in
+            try await attributionService.fetchDeferredDeepLink() { result in
                 switch result {
                 case .success(let linkData):
                     resultLinkData = linkData
@@ -116,6 +116,77 @@ final class AttributionServiceTests: XCTestCase {
         XCTAssertEqual(linkData.appStoreId, "987654321")
         XCTAssertEqual(linkData.domainType, "rootDomain")
         XCTAssertEqual(linkData.domain, "linklab.cc")
+        
+        // Verify the request was made correctly
+        XCTAssertTrue(MockURLProtocol.requestMade(to: expectedURL))
+    }
+    
+    func testFetchDeferredDeepLinkHandlesServerError() async throws {
+        // Configure the mock to respond with an error
+        let expectedURL = URL(string: "https://linklab.cc/apple-attribution")!
+        
+        // Mock a 404 Not Found response
+        let errorResponse = HTTPURLResponse(
+            url: expectedURL,
+            statusCode: 404,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        
+        // Add some error JSON as the response body
+        let errorResponseBody = """
+        {
+            "error": "Not found",
+            "message": "No deferred deep link found for this IP address"
+        }
+        """.data(using: .utf8)!
+        
+        MockURLProtocol.mockResponses[expectedURL] = (
+            data: errorResponseBody,
+            response: errorResponse,
+            error: nil
+        )
+        
+        // Create an expectation for the async call
+        let expectation = XCTestExpectation(description: "Fetch deferred deep link with error")
+        
+        // Call the method under test
+        var resultLinkData: LinkData?
+        var resultError: Error?
+        
+        do {
+            try await attributionService.fetchDeferredDeepLink() { result in
+                switch result {
+                case .success(let linkData):
+                    resultLinkData = linkData
+                case .failure(let error):
+                    resultError = error
+                }
+                expectation.fulfill()
+            }
+        } catch {
+            resultError = error
+            expectation.fulfill()
+        }
+        
+        // Wait for the expectation to be fulfilled
+        await fulfillment(of: [expectation], timeout: 1.0)
+        
+        // Verify results
+        XCTAssertNil(resultLinkData, "Should not have link data on error")
+        XCTAssertNotNil(resultError, "Should have an error")
+        
+        // Verify the error is of the expected type
+        if let linkError = resultError as? LinkError {
+            switch linkError {
+            case .apiError(let statusCode, _):
+                XCTAssertEqual(statusCode, 404, "Status code should be 404")
+            default:
+                XCTFail("Unexpected error type: \(linkError)")
+            }
+        } else {
+            XCTFail("Error should be a LinkError")
+        }
         
         // Verify the request was made correctly
         XCTAssertTrue(MockURLProtocol.requestMade(to: expectedURL))

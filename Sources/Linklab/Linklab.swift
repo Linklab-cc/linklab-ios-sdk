@@ -1,9 +1,5 @@
 import Foundation
 import StoreKit
-import AdServices
-
-#if canImport(AdServices)
-#endif
 
 @available(iOS 14.3, macOS 11.1, *)
 @MainActor
@@ -169,8 +165,7 @@ public class Linklab {
             // Check if this is a new installation
             if installationTracker.isFirstLaunch() {
                  Logger.info("First launch detected. Checking for deferred deep link.")
-                // Request attribution token from AdServices
-                #if canImport(AdServices)
+                 
                  // Ensure service is accessible from MainActor context before Task
                  guard let attributionService = self.attributionService as? AttributionService else {
                      // Already on MainActor, safe to log and return
@@ -182,13 +177,10 @@ public class Linklab {
                  // Capture the non-optional 'attributionService' constant defined above
                  Task { [attributionService] in 
                      do {
-                          Logger.debug("Requesting AdServices attribution token...")
-                         // The attributionToken() method is not async in AdServices
-                         let token = try AdServices.AAAttribution.attributionToken()
-                          Logger.debug("Received AdServices attribution token.")
+                          Logger.debug("Requesting deferred deep link based on IP address...")
                          
-                         // Send token to attribution service - use the captured 'attributionService'
-                          try await attributionService.fetchDeferredDeepLink(token: token) { result in
+                         // Send request to attribution service without token
+                          try await attributionService.fetchDeferredDeepLink() { result in
                               // Completion handler may run on any thread. Hop back to MainActor.
                               Task { @MainActor [weak self] in // Explicitly run callback logic on MainActor
                                   guard let self = self else { return } // Safely unwrap self
@@ -204,19 +196,13 @@ public class Linklab {
                               }
                          }
                      } catch {
-                          Logger.error("Failed to get attribution token: \(error.localizedDescription)")
+                          Logger.error("Failed to fetch deferred deep link: \(error.localizedDescription)")
                           // Hop back to MainActor to call notifyCallback safely
                           Task { @MainActor [weak self] in
-                              self?.notifyCallback(with: nil, error: LinkError.attributionError(error))
+                              self?.notifyCallback(with: nil, error: error)
                           }
                      }
                  }
-                 #else // AdServices not available
-                  // This code now runs on the MainActor because the class is @MainActor
-                  Logger.error("AdServices framework not available. Cannot fetch deferred deep link.")
-                  // Direct call is safe as we are already on MainActor
-                   self.notifyCallback(with: nil, error: LinkError.featureNotAvailable("AdServices"))
-                 #endif
             } else {
                  Logger.debug("Not first launch. Skipping deferred deep link check.")
             }

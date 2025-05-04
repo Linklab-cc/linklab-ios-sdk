@@ -12,11 +12,9 @@ class AttributionService {
     
     /// Fetches deferred deep link information from the attribution service
     /// - Parameters:
-    ///   - token: Attribution token from StoreKit
     ///   - completion: Completion handler with result containing LinkData
     /// - Returns: Void
     func fetchDeferredDeepLink(
-        token: String,
         completion: @escaping (Result<LinkData, Error>) -> Void
     ) async throws {
         // Build the URL with path for Apple attribution endpoint
@@ -27,15 +25,13 @@ class AttributionService {
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        // Create request body according to API spec
-        let body: [String: Any] = [
-            "attributionToken": token
-        ]
+        // Create an empty request body - server will use IP address to find the deferred deep link
+        let body: [String: Any] = [:]
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         
         do {
-            Logger.debug("Fetching deferred deep link with token...")
+            Logger.debug("Fetching deferred deep link based on IP address...")
             // Make the request
             let (data, response) = try await urlSession.data(for: request)
             
