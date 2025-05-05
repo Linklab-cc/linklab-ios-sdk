@@ -1,5 +1,8 @@
 import XCTest
 @testable import Linklab
+#if canImport(UIKit)
+import UIKit
+#endif
 
 final class AttributionServiceTests: XCTestCase {
     
@@ -190,6 +193,74 @@ final class AttributionServiceTests: XCTestCase {
         
         // Verify the request was made correctly
         XCTAssertTrue(MockURLProtocol.requestMade(to: expectedURL))
+    }
+    
+    func testFetchDeferredDeepLink_ClipboardLink() async throws {
+        #if canImport(UIKit)
+        // Simulate clipboard value
+        let testLinkId = "testid123"
+        let testDomainType = "rootDomain"
+        let testDomain = "linklab.cc"
+        let clipboardString = "linklab_\(testLinkId)_\(testDomainType)_\(testDomain)"
+        UIPasteboard.general.string = clipboardString
+
+        // Setup mock response for APIService.fetchLinkDetails
+        let jsonDict: [String: Any] = [
+            "id": testLinkId,
+            "fullLink": "https://example.com/product?id=123&campaign=test",
+            "createdAt": "2025-03-24T12:00:00Z",
+            "updatedAt": "2025-03-24T12:00:00Z",
+            "userId": "user123",
+            "packageName": NSNull(),
+            "bundleId": "com.example.app",
+            "appStoreId": "987654321",
+            "domainType": testDomainType,
+            "domain": testDomain
+        ]
+        let mockResponseData = try JSONSerialization.data(withJSONObject: jsonDict)
+        let expectedURL = URL(string: "https://linklab.cc/links/\(testLinkId)?domain=\(testDomain)")!
+        let headers = ["Content-Type": "application/json"]
+        MockURLProtocol.mockResponses[expectedURL] = (
+            data: mockResponseData,
+            response: HTTPURLResponse(
+                url: expectedURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: headers
+            )!,
+            error: nil
+        )
+        let expectation = XCTestExpectation(description: "Fetch deferred deep link from clipboard")
+        var resultLinkData: LinkData?
+        var resultError: Error?
+        do {
+            try await attributionService.fetchDeferredDeepLink() { result in
+                switch result {
+                case .success(let linkData):
+                    resultLinkData = linkData
+                case .failure(let error):
+                    resultError = error
+                }
+                expectation.fulfill()
+            }
+        } catch {
+            resultError = error
+            expectation.fulfill()
+        }
+        await fulfillment(of: [expectation], timeout: 1.0)
+        XCTAssertNil(resultError, "Should not have an error")
+        XCTAssertNotNil(resultLinkData, "Should have link data from clipboard")
+        guard let linkData = resultLinkData else {
+            XCTFail("LinkData should not be nil")
+            return
+        }
+        XCTAssertEqual(linkData.id, testLinkId)
+        XCTAssertEqual(linkData.domainType, testDomainType)
+        XCTAssertEqual(linkData.domain, testDomain)
+        XCTAssertTrue(MockURLProtocol.requestMade(to: expectedURL))
+        // Clear clipboard after test
+        UIPasteboard.general.string = nil
+        #endif
     }
 }
 
