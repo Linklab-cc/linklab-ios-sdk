@@ -103,8 +103,15 @@ public class Linklab {
     /// Get the most recently processed link data, if any
     /// - Returns: The most recent LinkData or nil if no link has been processed
     public func getLinkData() -> LinkData? {
-        return currentLinkData
-    }
+           // Retrieve the current link data to be returned.
+           let linkDataToReturn = currentLinkData
+           
+           // Clear the stored link data to prevent it from being returned again.
+           self.currentLinkData = nil
+           
+           // Return the retrieved data.
+           return linkDataToReturn
+       }
     
     // MARK: - Private Methods
     
