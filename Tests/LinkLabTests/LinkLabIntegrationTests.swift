@@ -82,7 +82,7 @@ final class LinkLabIntegrationTests: XCTestCase {
         let testURL = URL(string: "https://example.com/abc123")!
         
         // Call the deprecated method - should call through to handleIncomingURL
-        let handled = linklab.handleUniversalLink(testURL)
+        let handled = linklab.handleIncomingURL(testURL)
         
         // Should be handled
         XCTAssertTrue(handled, "URL should be handled by deprecated method")
