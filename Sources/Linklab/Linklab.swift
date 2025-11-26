@@ -35,11 +35,6 @@ public class Linklab {
     public func initialize(with config: Configuration, deepLinkCallback: @escaping (LinkData?) -> Void) {
         self.configuration = config
         self.deepLinkCallback = deepLinkCallback
-        // Removed initialization of configuredCustomDomains
-        // self.configuredCustomDomains = Set(config.customDomains.map { $0.lowercased() })
-        // if !configuredCustomDomains.isEmpty {
-        //      Logger.info("Initialized with custom domains: \(self.configuredCustomDomains.joined(separator: ", "))")
-        // }
         
         self.installationTracker = InstallationTracker()
         self.apiService = APIService()
@@ -72,10 +67,11 @@ public class Linklab {
 
         guard let host = url.host?.lowercased() else { // Lowercase host for comparison
             Logger.debug("Incoming URL has no host: \(url.absoluteString)")
-            return false // Still need a host to proceed
+            // Even if no host, we process it to return unrecognized
+            processIncomingURL(url, host: "")
+            return true
         }
 
-        // Removed domain validation checks. Assume any URL might be a LinkLab link.
         Logger.debug("Processing potential LinkLab URL: \(url.absoluteString)")
         processIncomingURL(url, host: host) // Pass the lowercased host
         return true // Indicate that we are processing this URL
@@ -121,24 +117,27 @@ public class Linklab {
     private func processIncomingURL(_ url: URL, host: String) {
         guard let apiService = apiService else {
             Logger.error("Linklab not initialized or APIService is missing.")
-            notifyCallback(with: nil, error: LinkError.notInitialized)
+            // Here we fall back to unrecognized if SDK is not ready but we want to fail open?
+            // Usually if not initialized we can't really do much, but following your logic:
+            notifyCallback(with: LinkData.unrecognized(url: url))
             return
         }
 
         // Extract the last path component as the potential link ID
         let linkId = url.lastPathComponent
-        guard !linkId.isEmpty && linkId != "/" else { // Ensure lastPathComponent is not empty or just "/"
-             Logger.error("Cannot extract link ID from URL: \(url.absoluteString)")
-             notifyCallback(with: nil, error: LinkError.invalidURL("Cannot extract link ID."))
+        
+        // Validation: If no ID or ID is just root, treat as unrecognized immediately
+        if linkId.isEmpty || linkId == "/" {
+             Logger.debug("URL does not contain a valid ID, treating as unrecognized: \(url.absoluteString)")
+             notifyCallback(with: LinkData.unrecognized(url: url))
              return
         }
 
-        // Domain is simply the host provided
-        let domain = host // Use the already lowercased host
+        let domain = host
 
         Logger.debug("Extracted LinkID: \(linkId), Domain: \(domain)")
 
-        // Call the API service to fetch link details - removed domainType parameter
+        // Call the API service to fetch link details
         apiService.fetchLinkDetails(linkId: linkId, domain: domain) { [weak self] result in
              // Hop back to main actor for UI updates / callback
              Task { @MainActor [weak self] in
@@ -146,11 +145,15 @@ public class Linklab {
                  switch result {
                  case .success(let linkData):
                       Logger.info("Successfully fetched link data for ID \(linkId)")
-                      // Pass the full LinkData object to the callback
                       self.notifyCallback(with: linkData)
+                      
                  case .failure(let error):
-                      Logger.error("Failed to fetch link details for ID \(linkId): \(error.localizedDescription)")
-                      self.notifyCallback(with: nil, error: error)
+                      // CHANGED: Instead of returning error, we assume it's not a LinkLab link
+                      // or the link is broken/expired/offline. We fall back to unrecognized.
+                      Logger.info("API request failed (Error: \(error.localizedDescription)). Treating as unrecognized link.")
+                      
+                      let fallbackData = LinkData.unrecognized(url: url)
+                      self.notifyCallback(with: fallbackData)
                  }
              }
         }
@@ -163,48 +166,41 @@ public class Linklab {
         }
         
         if #available(macOS 12.0, *) {
-            // Check if the service exists and is the correct type, don't need the value here.
             guard self.attributionService is AttributionService else {
                  Logger.debug("AttributionService not available or wrong type initially.")
                 return
             }
         
-            // Check if this is a new installation
             if installationTracker.isFirstLaunch() {
                  Logger.info("First launch detected. Checking for deferred deep link.")
                  
-                 // Ensure service is accessible from MainActor context before Task
                  guard let attributionService = self.attributionService as? AttributionService else {
-                     // Already on MainActor, safe to log and return
                      Logger.error("AttributionService not available when checking for deferred deep link.")
                      return
                  }
                  
-                 // Task runs detached from MainActor
-                 // Capture the non-optional 'attributionService' constant defined above
-                 Task { [attributionService] in 
+                 Task { [attributionService] in
                      do {
                           Logger.debug("Requesting deferred deep link based on IP address...")
                          
-                         // Send request to attribution service without token
                           try await attributionService.fetchDeferredDeepLink() { result in
-                              // Completion handler may run on any thread. Hop back to MainActor.
-                              Task { @MainActor [weak self] in // Explicitly run callback logic on MainActor
-                                  guard let self = self else { return } // Safely unwrap self
+                              Task { @MainActor [weak self] in
+                                  guard let self = self else { return }
                                   switch result {
-                                  case .success(let linkData): 
+                                  case .success(let linkData):
                                        Logger.info("Successfully fetched deferred link data.")
-                                       // Pass the full LinkData object to the callback
-                                       self.notifyCallback(with: linkData) // Safe on MainActor
+                                       self.notifyCallback(with: linkData)
                                   case .failure(let error):
                                        Logger.error("Failed to fetch deferred deep link: \(error.localizedDescription)")
-                                       self.notifyCallback(with: nil, error: error) // Safe on MainActor
+                                       // For deferred deep links, if it fails, we usually simply don't trigger anything,
+                                       // or we could trigger unrecognized if we really wanted to, but usually silence is better here
+                                       // unless there is a specific URL involved (which there isn't, just IP).
+                                       self.notifyCallback(with: nil, error: error)
                                   }
                               }
                          }
                      } catch {
                           Logger.error("Failed to fetch deferred deep link: \(error.localizedDescription)")
-                          // Hop back to MainActor to call notifyCallback safely
                           Task { @MainActor [weak self] in
                               self?.notifyCallback(with: nil, error: error)
                           }
@@ -220,24 +216,17 @@ public class Linklab {
 
     /// Helper to safely call the deep link callback on the main thread.
     private func notifyCallback(with linkData: LinkData? = nil, error: Error? = nil) {
-        // Ensure execution on the main thread
         if Thread.isMainThread {
-             if let error = error {
-                  // Optionally, enhance LinkDestination or callback to include errors
-                  Logger.error("Notifying callback with error: \(error.localizedDescription)")
-                  deepLinkCallback?(nil) // Pass nil data on error
-             } else {
-                  // Store the link data for later retrieval
-                  if let linkData = linkData {
-                      currentLinkData = linkData
-                  }
-                  
-                  // Log relevant info from LinkData
-                  Logger.debug("Notifying callback with LinkData: id=\(linkData?.id ?? "nil"), fullLink=\(linkData?.fullLink ?? "nil")")
+             // Prioritize returning linkData (even if it's unrecognized) over error
+             if let linkData = linkData {
+                  currentLinkData = linkData
+                  Logger.debug("Notifying callback with LinkData: id=\(linkData.id ?? "nil"), domainType=\(linkData.domainType)")
                   deepLinkCallback?(linkData)
+             } else if let error = error {
+                  Logger.error("Notifying callback with error: \(error.localizedDescription)")
+                  deepLinkCallback?(nil)
              }
         } else {
-            // Ensure hopping back to main thread if called from background
             Task { @MainActor [weak self] in
                 self?.notifyCallback(with: linkData, error: error)
             }

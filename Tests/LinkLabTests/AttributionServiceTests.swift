@@ -47,7 +47,7 @@ final class AttributionServiceTests: XCTestCase {
         // Create JSON data for response
         let jsonDict: [String: Any] = [
             "id": "abc123",
-            "fullLink": "https://example.com/product?id=123&campaign=test",
+            "rawLink": "https://example.com/product?id=123&campaign=test",
             "createdAt": "2025-03-24T12:00:00Z",
             "updatedAt": "2025-03-24T12:00:00Z",
             "userId": "user123",
@@ -113,7 +113,7 @@ final class AttributionServiceTests: XCTestCase {
         }
         
         XCTAssertEqual(linkData.id, "abc123")
-        XCTAssertEqual(linkData.fullLink, "https://example.com/product?id=123&campaign=test")
+        XCTAssertEqual(linkData.rawLink, "https://example.com/product?id=123&campaign=test")
         XCTAssertEqual(linkData.createdAt?.timeIntervalSince1970, createdDate?.timeIntervalSince1970)
         XCTAssertEqual(linkData.updatedAt?.timeIntervalSince1970, updatedDate?.timeIntervalSince1970)
         XCTAssertEqual(linkData.userId, "user123")

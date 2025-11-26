@@ -32,7 +32,7 @@ final class APIServiceTests: XCTestCase {
         // Setup mock response data
         let jsonDict: [String: Any] = [
             "id": "abc123",
-            "fullLink": "https://example.com/product?id=123&campaign=test",
+            "rawLink": "https://example.com/product?id=123&campaign=test",
             "createdAt": "2025-03-24T12:00:00Z",
             "updatedAt": "2025-03-24T12:00:00Z",
             "userId": "user123",
@@ -96,7 +96,7 @@ final class APIServiceTests: XCTestCase {
             }
             
             XCTAssertEqual(linkData.id, "abc123")
-            XCTAssertEqual(linkData.fullLink, "https://example.com/product?id=123&campaign=test")
+            XCTAssertEqual(linkData.rawLink, "https://example.com/product?id=123&campaign=test")
             XCTAssertEqual(linkData.userId, "user123")
             XCTAssertNil(linkData.packageName)
             XCTAssertEqual(linkData.bundleId, "com.example.app")

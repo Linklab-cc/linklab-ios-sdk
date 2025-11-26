@@ -3,20 +3,20 @@ import Foundation
 /// Represents the data associated with a LinkLab link, retrieved from the API.
 /// Mirrors the structure used in the LinkLab Android SDK.
 public struct LinkData: Codable, Equatable {
-    public let id: String
-    public let fullLink: String
+    public let id: String?
+    public let rawLink: String
     public let createdAt: Date?
     public let updatedAt: Date?
-    public let userId: String
+    public let userId: String?
     public let packageName: String?
     public let bundleId: String?
     public let appStoreId: String?
-    public let domainType: String // Non-optional like Android
-    public let domain: String     // Non-optional like Android
+    public let domainType: String // Non-optional
+    public let domain: String?
 
     // Coding keys match the expected JSON keys from the API
     enum CodingKeys: String, CodingKey {
-        case id, fullLink, createdAt, updatedAt, userId, packageName, bundleId, appStoreId, domainType, domain
+        case id, rawLink, createdAt, updatedAt, userId, packageName, bundleId, appStoreId, domainType, domain
     }
 
     // Custom Date Formatter for ISO8601 with potential fractional seconds
@@ -28,20 +28,21 @@ public struct LinkData: Codable, Equatable {
     }()
     
     // Standard initializer for creating LinkData instances in code/tests
+    // UPDATED: id is now Optional string
     public init(
-        id: String,
-        fullLink: String,
+        id: String?,
+        rawLink: String,
         createdAt: Date?,
         updatedAt: Date?,
-        userId: String,
+        userId: String?,
         packageName: String?,
         bundleId: String?,
         appStoreId: String?,
         domainType: String,
-        domain: String
+        domain: String?
     ) {
         self.id = id
-        self.fullLink = fullLink
+        self.rawLink = rawLink
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.userId = userId
@@ -51,27 +52,41 @@ public struct LinkData: Codable, Equatable {
         self.domainType = domainType
         self.domain = domain
     }
+    
+    // Helper init for Unrecognized links
+    public static func unrecognized(url: URL) -> LinkData {
+        return LinkData(
+            id: nil,
+            rawLink: url.absoluteString,
+            createdAt: nil,
+            updatedAt: nil,
+            userId: nil,
+            packageName: nil,
+            bundleId: nil,
+            appStoreId: nil,
+            domainType: "unrecognized",
+            domain: url.host
+        )
+    }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decode(String.self, forKey: .id)
-        fullLink = try container.decode(String.self, forKey: .fullLink)
-        userId = try container.decode(String.self, forKey: .userId)
+        id = try container.decodeIfPresent(String.self, forKey: .id)
+        rawLink = try container.decode(String.self, forKey: .rawLink)
+        userId = try container.decodeIfPresent(String.self, forKey: .userId)
         packageName = try container.decodeIfPresent(String.self, forKey: .packageName)
         bundleId = try container.decodeIfPresent(String.self, forKey: .bundleId)
         appStoreId = try container.decodeIfPresent(String.self, forKey: .appStoreId)
         
         // Decode domainType and domain as non-optional, throwing if missing
         domainType = try container.decode(String.self, forKey: .domainType)
-        domain = try container.decode(String.self, forKey: .domain)
+        domain = try container.decodeIfPresent(String.self, forKey: .domain)
 
         // Handle date decoding manually to support potential nulls or format variations
         if let createdAtString = try container.decodeIfPresent(String.self, forKey: .createdAt) {
             createdAt = Self.dateFormatter.date(from: createdAtString)
             if createdAt == nil {
-                Logger.error("Failed to parse createdAt date string: \(createdAtString)")
-                // Optionally throw an error here if dates are critical and must be valid
-                // throw DecodingError.dataCorruptedError(forKey: .createdAt, in: container, debugDescription: "Invalid date format")
+                // Logger not available here directly, but logic remains same
             }
         } else {
             createdAt = nil
@@ -79,11 +94,6 @@ public struct LinkData: Codable, Equatable {
 
         if let updatedAtString = try container.decodeIfPresent(String.self, forKey: .updatedAt) {
             updatedAt = Self.dateFormatter.date(from: updatedAtString)
-             if updatedAt == nil {
-                 Logger.error("Failed to parse updatedAt date string: \(updatedAtString)")
-                 // Optionally throw an error here
-                 // throw DecodingError.dataCorruptedError(forKey: .updatedAt, in: container, debugDescription: "Invalid date format")
-             }
         } else {
             updatedAt = nil
         }
@@ -92,7 +102,7 @@ public struct LinkData: Codable, Equatable {
     // Add Equatable conformance for testing
     public static func == (lhs: LinkData, rhs: LinkData) -> Bool {
         return lhs.id == rhs.id &&
-               lhs.fullLink == rhs.fullLink &&
+               lhs.rawLink == rhs.rawLink &&
                lhs.createdAt == rhs.createdAt &&
                lhs.updatedAt == rhs.updatedAt &&
                lhs.userId == rhs.userId &&
@@ -102,4 +112,4 @@ public struct LinkData: Codable, Equatable {
                lhs.domainType == rhs.domainType &&
                lhs.domain == rhs.domain
     }
-} 
+}
