@@ -16,7 +16,9 @@ public struct LinkData: Codable, Equatable {
 
     // Coding keys match the expected JSON keys from the API
     enum CodingKeys: String, CodingKey {
-        case id, rawLink, createdAt, updatedAt, userId, packageName, bundleId, appStoreId, domainType, domain
+        case id
+        case rawLink = "fullLink"
+        case createdAt, updatedAt, userId, packageName, bundleId, appStoreId, domainType, domain
     }
 
     // Custom Date Formatter for ISO8601 with potential fractional seconds
