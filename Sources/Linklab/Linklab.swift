@@ -25,8 +25,24 @@ public class Linklab {
     
     // Store incoming URL if it arrives before initialization
     private var pendingDeepLinkURL: URL?
-    
+    private var deferredDeepLinkTask: Task<Void, Never>?
+
     private init() {}
+
+    @available(macOS 12.0, *)
+    internal init(apiService: APIService, attributionService: AttributionService, installationTracker: InstallationTracker) {
+        self.apiService = apiService
+        self.attributionService = attributionService
+        self.installationTracker = installationTracker
+    }
+
+    public func getInitialLink() async -> LinkData? {
+        if currentLinkData == nil {
+            checkForDeferredDeepLink()
+        }
+        await deferredDeepLinkTask?.value
+        return getLinkData()
+    }
     
     /// Initialize the Linklab SDK
     /// - Parameters:
@@ -36,9 +52,9 @@ public class Linklab {
         self.configuration = config
         self.deepLinkCallback = deepLinkCallback
         
-        self.installationTracker = InstallationTracker()
-        self.apiService = APIService()
-        if #available(macOS 12.0, *) {
+        self.installationTracker = installationTracker ?? InstallationTracker()
+        self.apiService = apiService ?? APIService()
+        if #available(macOS 12.0, *), attributionService == nil {
             self.attributionService = AttributionService()
         }
         
@@ -160,6 +176,7 @@ public class Linklab {
     }
 
     private func checkForDeferredDeepLink() {
+        guard deferredDeepLinkTask == nil else { return }
         guard let installationTracker = installationTracker else {
             Logger.error("Linklab not initialized")
             return
@@ -179,31 +196,24 @@ public class Linklab {
                      return
                  }
                  
-                 Task { [attributionService] in
+                 deferredDeepLinkTask = Task { @MainActor [weak self, attributionService] in
+                     guard let self = self else { return }
+                     defer { self.deferredDeepLinkTask = nil }
                      do {
                           Logger.debug("Requesting deferred deep link based on IP address...")
-                         
-                          try await attributionService.fetchDeferredDeepLink() { result in
-                              Task { @MainActor [weak self] in
-                                  guard let self = self else { return }
-                                  switch result {
-                                  case .success(let linkData):
-                                       Logger.info("Successfully fetched deferred link data.")
-                                       self.notifyCallback(with: linkData)
-                                  case .failure(let error):
-                                       Logger.error("Failed to fetch deferred deep link: \(error.localizedDescription)")
-                                       // For deferred deep links, if it fails, we usually simply don't trigger anything,
-                                       // or we could trigger unrecognized if we really wanted to, but usually silence is better here
-                                       // unless there is a specific URL involved (which there isn't, just IP).
-                                       self.notifyCallback(with: nil, error: error)
-                                  }
-                              }
-                         }
+                          let linkData = try await attributionService.fetchDeferredDeepLink()
+                          installationTracker.markAttributionCompleted()
+                          Logger.info("Successfully fetched deferred link data.")
+                          self.notifyCallback(with: linkData)
                      } catch {
-                          Logger.error("Failed to fetch deferred deep link: \(error.localizedDescription)")
-                          Task { @MainActor [weak self] in
-                              self?.notifyCallback(with: nil, error: error)
+                          if case LinkError.apiError(statusCode: 404, message: _) = error {
+                              installationTracker.markAttributionCompleted()
                           }
+                          Logger.error("Failed to fetch deferred deep link: \(error.localizedDescription)")
+                          // For deferred deep links, if it fails, we usually simply don't trigger anything,
+                          // or we could trigger unrecognized if we really wanted to, but usually silence is better here
+                          // unless there is a specific URL involved (which there isn't, just IP).
+                          self.notifyCallback(with: nil, error: error)
                      }
                  }
             } else {

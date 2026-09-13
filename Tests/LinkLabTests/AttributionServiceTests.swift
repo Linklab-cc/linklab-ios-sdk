@@ -20,9 +20,10 @@ final class AttributionServiceTests: XCTestCase {
         
         // Reset the mock data for each test
         MockURLProtocol.mockResponses = [:]
-        
+        MockURLProtocol.clearRequests()
+
         // Create the attribution service with the mock session
-        attributionService = AttributionService(urlSession: urlSession)
+        attributionService = AttributionService(urlSession: urlSession, clipboardReader: { nil })
     }
     
     override func tearDown() {
@@ -47,7 +48,7 @@ final class AttributionServiceTests: XCTestCase {
         // Create JSON data for response
         let jsonDict: [String: Any] = [
             "id": "abc123",
-            "rawLink": "https://example.com/product?id=123&campaign=test",
+            "fullLink": "https://example.com/product?id=123&campaign=test",
             "createdAt": "2025-03-24T12:00:00Z",
             "updatedAt": "2025-03-24T12:00:00Z",
             "userId": "user123",
@@ -127,6 +128,43 @@ final class AttributionServiceTests: XCTestCase {
         XCTAssertTrue(MockURLProtocol.requestMade(to: expectedURL))
     }
     
+    func testClipboardAttributionPreservesPromoURL() async throws {
+        let expectedURL = URL(string: "https://linklab.cc/links/6IbTF?domain=app.potje.tech")!
+        let json = #"{"id":"6IbTF","fullLink":"https://potje.tech/en/?promoId=75iOS8HDjnRcPNS00qor\u0026type=getPromoCode","domainType":"customDomain","domain":"app.potje.tech"}"#
+        MockURLProtocol.mockResponses[expectedURL] = (
+            data: Data(json.utf8),
+            response: HTTPURLResponse(url: expectedURL, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+            error: nil
+        )
+        let service = AttributionService(urlSession: urlSession, clipboardReader: {
+            "linklab_6IbTF_customDomain_app.potje.tech"
+        })
+
+        let data = try await service.fetchDeferredDeepLink()
+        XCTAssertEqual(data.rawLink, "https://potje.tech/en/?promoId=75iOS8HDjnRcPNS00qor&type=getPromoCode")
+        XCTAssertTrue(MockURLProtocol.requestMade(to: expectedURL))
+        XCTAssertFalse(MockURLProtocol.requestMade(to: URL(string: "https://linklab.cc/apple-attribution")!))
+    }
+
+    func testFailureCompletionIsCalledOnceWithoutThrowingAgain() async {
+        let url = URL(string: "https://linklab.cc/apple-attribution")!
+        MockURLProtocol.mockResponses[url] = (
+            data: Data(),
+            response: HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil)!,
+            error: nil
+        )
+        var callbackCount = 0
+        do {
+            try await attributionService.fetchDeferredDeepLink { result in
+                callbackCount += 1
+                if case .success = result { XCTFail("Expected attribution failure") }
+            }
+        } catch {
+            XCTFail("Failure already delivered through completion must not also throw")
+        }
+        XCTAssertEqual(callbackCount, 1)
+    }
+
     func testFetchDeferredDeepLinkHandlesServerError() async throws {
         // Configure the mock to respond with an error
         let expectedURL = URL(string: "https://linklab.cc/apple-attribution")!

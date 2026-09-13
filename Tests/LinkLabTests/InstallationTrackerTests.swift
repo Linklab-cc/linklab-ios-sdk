@@ -22,7 +22,11 @@ final class InstallationTrackerTests: XCTestCase {
         // First call should return true
         XCTAssertTrue(installationTracker.isFirstLaunch())
         
+        XCTAssertTrue(installationTracker.isFirstLaunch())
+        installationTracker.markAttributionCompleted()
+
         // Second call should return false
         XCTAssertFalse(installationTracker.isFirstLaunch())
+        XCTAssertFalse(InstallationTracker().isFirstLaunch())
     }
 }

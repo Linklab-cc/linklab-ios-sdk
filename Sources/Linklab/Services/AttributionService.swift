@@ -1,14 +1,24 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 @available(iOS 14.0, macOS 12.0, *)
 class AttributionService {
     private let baseURL: URL
     private let urlSession: URLSession
-    
-    init(urlSession: URLSession = .shared) {
+    private let clipboardReader: () async -> String?
+
+    init(urlSession: URLSession = .shared, clipboardReader: @escaping () async -> String? = {
+        #if canImport(UIKit)
+        return await MainActor.run { UIPasteboard.general.string }
+        #else
+        return nil
+        #endif
+    }) {
         self.baseURL = URL(string: "https://linklab.cc")!
         self.urlSession = urlSession
+        self.clipboardReader = clipboardReader
     }
     
     /// Fetches deferred deep link information from the attribution service
@@ -18,15 +28,24 @@ class AttributionService {
     func fetchDeferredDeepLink(
         completion: @escaping (Result<LinkData, Error>) -> Void
     ) async throws {
+        do {
+            completion(.success(try await fetchDeferredDeepLink()))
+        } catch {
+            completion(.failure(error))
+        }
+    }
+
+    func fetchDeferredDeepLink() async throws -> LinkData {
         // 1. Try to get link info from clipboard
-        if let clipboardString = UIPasteboard.general.string,
+        if let clipboardString = await clipboardReader(),
            let (linkId, domainType, domain) = AttributionService.parseClipboardLink(clipboardString) {
             Logger.debug("Found Linklab link in clipboard: linkId=\(linkId), domainType=\(domainType), domain=\(domain)")
             let apiService = APIService(urlSession: urlSession)
-            apiService.fetchLinkDetails(linkId: linkId, domain: domain) { result in
-                completion(result)
+            return try await withCheckedThrowingContinuation { continuation in
+                apiService.fetchLinkDetails(linkId: linkId, domain: domain) { result in
+                    continuation.resume(with: result)
+                }
             }
-            return
         } else {
             Logger.debug("No valid Linklab link found in clipboard.")
         }
@@ -61,10 +80,9 @@ class AttributionService {
                 throw LinkError.decodingError(NSError(domain: "LinklabSDK", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to decode LinkData from attribution endpoint."]))
             }
             Logger.debug("Successfully fetched and decoded deferred LinkData.")
-            completion(.success(linkData))
+            return linkData
         } catch {
             Logger.error("Error during fetchDeferredDeepLink: \(error.localizedDescription)")
-            completion(.failure(error))
             throw error
         }
     }

@@ -32,7 +32,7 @@ final class APIServiceTests: XCTestCase {
         // Setup mock response data
         let jsonDict: [String: Any] = [
             "id": "abc123",
-            "rawLink": "https://example.com/product?id=123&campaign=test",
+            "fullLink": "https://example.com/product?id=123&campaign=test",
             "createdAt": "2025-03-24T12:00:00Z",
             "updatedAt": "2025-03-24T12:00:00Z",
             "userId": "user123",
