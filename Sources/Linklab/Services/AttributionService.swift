@@ -1,104 +1,79 @@
 import Foundation
-#if canImport(UIKit)
-import UIKit
-#endif
 
-@available(iOS 14.0, macOS 12.0, *)
-class AttributionService {
-    private let baseURL: URL
-    private let urlSession: URLSession
-    private let clipboardReader: () async -> String?
+/// Deferred deep-link sources: pasteboard (URL or legacy token) and IP attribution.
+final class AttributionService {
+    private let apiService: APIService
+    private let configuration: LinklabConfiguration
+    private let pasteboard: PasteboardReading
 
-    init(urlSession: URLSession = .shared, clipboardReader: @escaping () async -> String? = {
-        #if canImport(UIKit)
-        return await MainActor.run { UIPasteboard.general.string }
-        #else
-        return nil
-        #endif
-    }) {
-        self.baseURL = URL(string: "https://linklab.cc")!
-        self.urlSession = urlSession
-        self.clipboardReader = clipboardReader
+    init(apiService: APIService, configuration: LinklabConfiguration, pasteboard: PasteboardReading) {
+        self.apiService = apiService
+        self.configuration = configuration
+        self.pasteboard = pasteboard
     }
-    
-    /// Fetches deferred deep link information from the attribution service
-    /// - Parameters:
-    ///   - completion: Completion handler with result containing LinkData
-    /// - Returns: Void
-    func fetchDeferredDeepLink(
-        completion: @escaping (Result<LinkData, Error>) -> Void
-    ) async throws {
-        do {
-            completion(.success(try await fetchDeferredDeepLink()))
-        } catch {
-            completion(.failure(error))
+
+    // MARK: - Pasteboard
+
+    /// Applies the pasteboard gates (`hasStrings`, then `detectPatterns`) and reads the string at most once.
+    /// Returns `nil` when the pasteboard holds nothing that looks like a Linklab reference.
+    func readPasteboardCandidate() async -> PasteboardCandidate? {
+        guard await pasteboard.hasStrings() else {
+            LinklabLogger.debug("Pasteboard has no strings; skipping.")
+            return nil
         }
-    }
-
-    func fetchDeferredDeepLink() async throws -> LinkData {
-        // 1. Try to get link info from clipboard
-        if let clipboardString = await clipboardReader(),
-           let (linkId, domainType, domain) = AttributionService.parseClipboardLink(clipboardString) {
-            Logger.debug("Found Linklab link in clipboard: linkId=\(linkId), domainType=\(domainType), domain=\(domain)")
-            let apiService = APIService(urlSession: urlSession)
-            return try await withCheckedThrowingContinuation { continuation in
-                apiService.fetchLinkDetails(linkId: linkId, domain: domain) { result in
-                    continuation.resume(with: result)
-                }
-            }
+        let detected = await pasteboard.detectsWebURL()
+        if detected == true {
+            LinklabLogger.debug("Pasteboard contains a probable web URL.")
         } else {
-            Logger.debug("No valid Linklab link found in clipboard.")
+            // No URL pattern (or detection unavailable): read anyway to support the legacy token.
+            LinklabLogger.debug("No web URL pattern on pasteboard; reading for a legacy token.")
         }
-        // 2. Fallback: Call /apple-attribution endpoint (can be removed in future)
+        guard let string = await pasteboard.string() else { return nil }
+        let candidate = PasteboardCandidate.parse(string, customDomains: configuration.customDomains)
+        if candidate == nil {
+            LinklabLogger.debug("Pasteboard content is not a Linklab reference.")
+        }
+        return candidate
+    }
+
+    /// Resolves a candidate. Returns `nil` when the backend does not know the link (404).
+    func resolve(_ candidate: PasteboardCandidate) async throws -> LinkData? {
         do {
-            let url = baseURL.appendingPathComponent("apple-attribution")
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-            let body: [String: Any] = [:]
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            Logger.debug("Fetching deferred deep link based on IP address...")
-            let (data, response) = try await urlSession.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                Logger.error("Invalid response type received from attribution endpoint.")
-                throw LinkError.invalidResponse
-            }
-            guard 200..<300 ~= httpResponse.statusCode else {
-                var errorMessage = "Attribution endpoint returned error: Status code \(httpResponse.statusCode)"
-                if let body = String(data: data, encoding: .utf8) {
-                     errorMessage += " Body: \(body)"
-                }
-                Logger.error(errorMessage)
-                throw LinkError.apiError(statusCode: httpResponse.statusCode, message: "Attribution endpoint error.")
-            }
-            let decoder = JSONDecoder()
-            guard let linkData = try? decoder.decode(LinkData.self, from: data) else {
-                Logger.error("Failed to decode LinkData from attribution endpoint.")
-                if let jsonString = String(data: data, encoding: .utf8) {
-                    Logger.error("Raw JSON response from attribution: \(jsonString)")
-                }
-                throw LinkError.decodingError(NSError(domain: "LinklabSDK", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to decode LinkData from attribution endpoint."]))
-            }
-            Logger.debug("Successfully fetched and decoded deferred LinkData.")
-            return linkData
-        } catch {
-            Logger.error("Error during fetchDeferredDeepLink: \(error.localizedDescription)")
-            throw error
+            let decoded = try await apiService.fetchLink(id: candidate.linkId, domain: candidate.domain)
+            return LinkData.resolved(from: decoded, shortLink: candidate.shortLink, isDeferred: true, matchType: LinkData.MatchType.clipboard)
+        } catch LinkError.apiError(statusCode: 404, message: _) {
+            LinklabLogger.debug("Pasteboard link is unknown to the backend.")
+            return nil
         }
     }
-    
-    /// Parses a clipboard string for a Linklab link in the format 'linklab_<linkId>_<domainType>_<domain>'
-    /// - Returns: (linkId, domainType, domain) if found, else nil
-    static func parseClipboardLink(_ string: String) -> (String, String, String)? {
-        let pattern = "^linklab_([^_]+)_([^_]+)_(.+)$"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
-        let range = NSRange(location: 0, length: string.utf16.count)
-        if let match = regex.firstMatch(in: string, options: [], range: range), match.numberOfRanges == 4 {
-            let linkId = (string as NSString).substring(with: match.range(at: 1))
-            let domainType = (string as NSString).substring(with: match.range(at: 2))
-            let domain = (string as NSString).substring(with: match.range(at: 3))
-            return (linkId, domainType, domain)
-        }
-        return nil
+
+    // MARK: - IP attribution
+
+    /// `POST /apple-attribution`. Returns `nil` when there is no deferred link for this device.
+    func fetchIPAttribution() async throws -> LinkData? {
+        let body: [String: String] = [
+            "osVersion": Self.osVersionString,
+            "deviceModel": Self.deviceModel,
+            "locale": Locale.current.identifier,
+            "timeZone": TimeZone.current.identifier,
+            "bundleId": Bundle.main.bundleIdentifier ?? "unknown",
+        ]
+        guard let decoded = try await apiService.fetchIPAttribution(body: body) else { return nil }
+        return LinkData.resolved(from: decoded, shortLink: nil, isDeferred: true, matchType: LinkData.MatchType.ipAddress)
+    }
+
+    static var osVersionString: String {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        return "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
+    }
+
+    /// Hardware identifier such as `iPhone15,2` (from `utsname`).
+    static var deviceModel: String {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        let mirror = Mirror(reflecting: systemInfo.machine)
+        let bytes = mirror.children.compactMap { $0.value as? Int8 }.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        let model = String(decoding: bytes, as: UTF8.self)
+        return model.isEmpty ? "unknown" : model
     }
 }

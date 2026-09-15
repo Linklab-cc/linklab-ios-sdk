@@ -4,19 +4,28 @@ import PackageDescription
 
 let package = Package(
     name: "Linklab",
-    platforms: [.iOS("14.3")],
+    platforms: [
+        .iOS("14.3"),
+        .macOS(.v12),
+    ],
     products: [
         .library(
             name: "Linklab",
-            targets: ["Linklab"]),
+            targets: ["Linklab"]
+        ),
     ],
     dependencies: [],
     targets: [
         .target(
             name: "Linklab",
-            dependencies: []),
+            dependencies: [],
+            path: "Sources/Linklab",
+            resources: [.copy("PrivacyInfo.xcprivacy")]
+        ),
         .testTarget(
             name: "LinklabTests",
-            dependencies: ["Linklab"]),
+            dependencies: ["Linklab"],
+            path: "Tests/LinklabTests"
+        ),
     ]
 )

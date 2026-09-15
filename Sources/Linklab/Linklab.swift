@@ -1,245 +1,358 @@
 import Foundation
-import StoreKit
 
-@available(iOS 14.3, macOS 11.1, *)
+/// Entry point of the Linklab iOS SDK.
+///
+/// Call `initialize(with:onLink:onError:)` once at launch, forward every incoming URL to
+/// `handleIncomingURL(_:)`, and receive resolved links through `onLink`.
+@available(iOS 14.3, macOS 12.0, *)
 @MainActor
-public class Linklab {
-    // Define constants for LinkLab domain
-    private static let linklabHost = "linklab.cc"
-    
+public final class Linklab {
     public static let shared = Linklab()
-    
-    // Store configuration including custom domains
-    private var configuration: Configuration?
 
-    private var installationTracker: InstallationTracker?
+    // MARK: - Public state
+
+    /// Receives every delivered link exactly once. If set after a link was delivered while no callback was
+    /// registered, that link is replayed once.
+    public var onLink: ((LinkData) -> Void)? {
+        didSet { replayUndeliveredLinkIfNeeded() }
+    }
+
+    /// Receives failures of the deferred check and of `checkPasteboard()`. Direct-link failures are reported
+    /// through `onLink` with `resolutionStatus == "failed"` instead.
+    public var onError: ((LinkError) -> Void)?
+
+    /// The most recently delivered link (non-destructive).
+    public private(set) var lastLink: LinkData?
+
+    /// The first link delivered in this process.
+    public private(set) var firstLink: LinkData?
+
+    /// The active configuration, once `initialize(with:)` has been called.
+    public private(set) var configuration: LinklabConfiguration?
+
+    public var isInitialized: Bool { configuration != nil }
+
+    // MARK: - Dependencies
+
+    private let urlSession: URLSession
+    private let userDefaults: UserDefaults
+    private let pasteboard: PasteboardReading
+    private let sleeper: Sleeper
     private var apiService: APIService?
-    // Using Any type for macOS compatibility - will be downcast when used
-    private var attributionService: Any?
-    
-    // Callback now returns the full LinkData object
-    private var deepLinkCallback: ((LinkData?) -> Void)?
-    
-    // Store the most recent link data
-    private var currentLinkData: LinkData?
-    
-    // Store incoming URL if it arrives before initialization
-    private var pendingDeepLinkURL: URL?
-    private var deferredDeepLinkTask: Task<Void, Never>?
+    private var attributionService: AttributionService?
+    private var store: DeferredLinkStore?
 
-    private init() {}
+    // MARK: - Runtime state
 
-    @available(macOS 12.0, *)
-    internal init(apiService: APIService, attributionService: AttributionService, installationTracker: InstallationTracker) {
-        self.apiService = apiService
-        self.attributionService = attributionService
-        self.installationTracker = installationTracker
+    private var pendingURLs: [URL] = []
+    private var inFlight: [String: Task<Void, Never>] = [:]
+    private var deferredTask: Task<Void, Never>?
+    private var hasUndeliveredLink = false
+    private var initializationWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+
+    /// Internal so tests can inject a mocked session, isolated defaults and a fake pasteboard.
+    init(
+        urlSession: URLSession = .shared,
+        userDefaults: UserDefaults = .standard,
+        pasteboard: PasteboardReading = SystemPasteboardReader(),
+        sleeper: @escaping Sleeper = { seconds in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+        }
+    ) {
+        self.urlSession = urlSession
+        self.userDefaults = userDefaults
+        self.pasteboard = pasteboard
+        self.sleeper = sleeper
     }
 
-    public func getInitialLink() async -> LinkData? {
-        if currentLinkData == nil {
-            checkForDeferredDeepLink()
-        }
-        await deferredDeepLinkTask?.value
-        return getLinkData()
-    }
-    
-    /// Initialize the Linklab SDK
-    /// - Parameters:
-    ///   - config: Configuration for the Linklab SDK
-    ///   - deepLinkCallback: Callback called when a deep link is processed, returning LinkData
-    public func initialize(with config: Configuration, deepLinkCallback: @escaping (LinkData?) -> Void) {
-        self.configuration = config
-        self.deepLinkCallback = deepLinkCallback
-        
-        self.installationTracker = installationTracker ?? InstallationTracker()
-        self.apiService = apiService ?? APIService()
-        if #available(macOS 12.0, *), attributionService == nil {
-            self.attributionService = AttributionService()
-        }
-        
-        // Check for deferred deep link if this is a new installation
-        checkForDeferredDeepLink()
+    // MARK: - Initialization
 
-        // Process any pending deep link URL received before initialization
-        if let pendingURL = pendingDeepLinkURL {
-            Logger.debug("Processing pending deep link URL: \(pendingURL.absoluteString)")
-            handleIncomingURL(pendingURL) // Process the stored URL
-            self.pendingDeepLinkURL = nil // Clear the stored URL
+    /// Initializes the SDK. Safe to call once per launch, as early as possible (e.g. in
+    /// `application(_:didFinishLaunchingWithOptions:)`). URLs passed to `handleIncomingURL(_:)` before this call
+    /// are queued and processed in order.
+    public func initialize(
+        with configuration: LinklabConfiguration,
+        onLink: ((LinkData) -> Void)? = nil,
+        onError: ((LinkError) -> Void)? = nil
+    ) {
+        LinklabLogger.isEnabled = configuration.debugLoggingEnabled
+        self.configuration = configuration
+
+        let api = APIService(configuration: configuration, urlSession: urlSession, sleeper: sleeper)
+        apiService = api
+        store = DeferredLinkStore(userDefaults: userDefaults)
+        attributionService = AttributionService(apiService: api, configuration: configuration, pasteboard: pasteboard)
+
+        if let onError { self.onError = onError }
+        if let onLink { self.onLink = onLink }
+        LinklabLogger.info("Linklab \(Linklab.version) initialized (customDomains: \(configuration.customDomains.count), pasteboard: \(configuration.pasteboardMode))")
+
+        resumeInitializationWaiters()
+
+        let queued = pendingURLs
+        pendingURLs = []
+        for url in queued {
+            handleIncomingURL(url)
         }
+
+        runDeferredCheckIfNeeded()
     }
-    
-    /// Handle an incoming URL (Universal Link or Custom Scheme)
-    /// - Parameter url: The URL that was opened
-    /// - Returns: Boolean indicating whether the URL was identified as a LinkLab link and is being processed.
+
+    /// Deprecated: use `initialize(with:onLink:onError:)`. The callback is bridged to `onLink`.
+    @available(*, deprecated, message: "Use initialize(with:onLink:onError:) instead.")
+    public func initialize(with configuration: LinklabConfiguration, deepLinkCallback: @escaping (LinkData?) -> Void) {
+        initialize(with: configuration, onLink: { deepLinkCallback($0) }, onError: nil)
+    }
+
+    // MARK: - Incoming URLs
+
+    /// `true` for http(s) URLs on linklab.cc, a subdomain of it, or a configured custom domain.
+    /// Before `initialize(with:)`, only linklab.cc hosts are known.
+    public func isLinklabLink(_ url: URL) -> Bool {
+        LinklabHost.isLinklabLink(url, customDomains: configuration?.customDomains ?? [])
+    }
+
+    /// Forwards a URL the app received (universal link, `onOpenURL`, user activity).
+    ///
+    /// Returns `false` and delivers nothing for non-http(s) URLs and URLs whose host is not a Linklab host.
+    /// Before `initialize(with:)` the URL is queued; the return value then reflects only the built-in hosts,
+    /// because custom domains are not known yet.
     @discardableResult
     public func handleIncomingURL(_ url: URL) -> Bool {
-        // Check if the SDK has been initialized
-        guard configuration != nil else {
-            Logger.info("SDK not yet initialized. Storing incoming URL for later processing: \(url.absoluteString)")
-            self.pendingDeepLinkURL = url
-            return true // Indicate that we will handle this URL later
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            LinklabLogger.debug("Ignoring URL with unsupported scheme: \(url.scheme ?? "nil")")
+            return false
         }
-
-        guard let host = url.host?.lowercased() else { // Lowercase host for comparison
-            Logger.debug("Incoming URL has no host: \(url.absoluteString)")
-            // Even if no host, we process it to return unrecognized
-            processIncomingURL(url, host: "")
-            return true
+        guard let configuration else {
+            LinklabLogger.debug("Not initialized yet; queueing \(LinklabLogger.describe(url))")
+            pendingURLs.append(url)
+            return LinklabHost.isLinklabLink(url, customDomains: [])
         }
-
-        Logger.debug("Processing potential LinkLab URL: \(url.absoluteString)")
-        processIncomingURL(url, host: host) // Pass the lowercased host
-        return true // Indicate that we are processing this URL
+        guard LinklabHost.isLinklabLink(url, customDomains: configuration.customDomains) else {
+            LinklabLogger.debug("Ignoring non-Linklab URL \(LinklabLogger.describe(url))")
+            return false
+        }
+        process(url)
+        return true
     }
 
-    // MARK: - Deprecated Handlers (Kept for compatibility, redirect to new handler)
-
-    /// Deprecated: Use handleIncomingURL instead. Handles a Universal Link.
-    /// - Parameter url: The URL that was opened
-    /// - Returns: Boolean indicating whether the URL was handled
-    @available(*, deprecated, message: "Use handleIncomingURL(_:) instead.")
+    /// Deprecated: use `handleIncomingURL(_:)`.
+    @available(*, deprecated, renamed: "handleIncomingURL(_:)")
     @discardableResult
     public func handleUniversalLink(_ url: URL) -> Bool {
-        return handleIncomingURL(url)
+        handleIncomingURL(url)
     }
 
-    // Optional: Add a similar handler for custom schemes if your app uses them
-    // public func handleCustomSchemeURL(_ url: URL) -> Bool { ... }
-    
-    /// Manually trigger processing of a deferred deep link
+    // MARK: - Reading results
+
+    /// The most recently delivered link, without clearing it.
+    public func getLinkData() -> LinkData? { lastLink }
+
+    /// The first link delivered in this process, or `nil`.
+    ///
+    /// Waits (up to 5 s) for `initialize(with:)` if it has not been called yet, then for any in-flight direct
+    /// fetch and the deferred check. Never triggers a callback by itself.
+    public func getInitialLink() async -> LinkData? {
+        if configuration == nil {
+            await waitForInitialization(timeout: 5)
+        }
+        await awaitInFlightWork(timeout: 5)
+        return firstLink
+    }
+
+    /// Runs the deferred (first-launch) check if the persisted state machine still allows it.
+    /// Called automatically by `initialize(with:)`; normally there is no need to call it.
     public func processDeferredDeepLink() {
-        checkForDeferredDeepLink()
+        runDeferredCheckIfNeeded()
     }
-    
-    /// Get the most recently processed link data, if any
-    /// - Returns: The most recent LinkData or nil if no link has been processed
-    public func getLinkData() -> LinkData? {
-           // Retrieve the current link data to be returned.
-           let linkDataToReturn = currentLinkData
-           
-           // Clear the stored link data to prevent it from being returned again.
-           self.currentLinkData = nil
-           
-           // Return the retrieved data.
-           return linkDataToReturn
-       }
-    
-    // MARK: - Private Methods
-    
-    /// Checks if the URL is a LinkLab URL and initiates fetching details if it is.
-    /// - Parameter url: The incoming URL.
-    /// - Parameter host: The lowercased host extracted from the URL.
-    private func processIncomingURL(_ url: URL, host: String) {
-        guard let apiService = apiService else {
-            Logger.error("Linklab not initialized or APIService is missing.")
-            // Here we fall back to unrecognized if SDK is not ready but we want to fail open?
-            // Usually if not initialized we can't really do much, but following your logic:
-            notifyCallback(with: LinkData.unrecognized(url: url))
-            return
+
+    /// Reads the pasteboard once and resolves a Linklab URL or token found there.
+    ///
+    /// Intended for `pasteboardMode == .manual` after an explicit user action; also allowed in `.automatic`.
+    /// Returns `nil` in `.disabled` mode or when nothing was found. The result is returned **and**, when
+    /// `deliver` is `true` (default), also delivered through `onLink`.
+    @discardableResult
+    public func checkPasteboard(deliver: Bool = true) async -> LinkData? {
+        guard let configuration, let attributionService else {
+            onError?(.notInitialized)
+            return nil
         }
-
-        // Extract the last path component as the potential link ID
-        let linkId = url.lastPathComponent
-        
-        // Validation: If no ID or ID is just root, treat as unrecognized immediately
-        if linkId.isEmpty || linkId == "/" {
-             Logger.debug("URL does not contain a valid ID, treating as unrecognized: \(url.absoluteString)")
-             notifyCallback(with: LinkData.unrecognized(url: url))
-             return
+        guard configuration.pasteboardMode != .disabled else {
+            LinklabLogger.debug("checkPasteboard() ignored: pasteboardMode is .disabled")
+            return nil
         }
-
-        let domain = host
-
-        Logger.debug("Extracted LinkID: \(linkId), Domain: \(domain)")
-
-        // Call the API service to fetch link details
-        apiService.fetchLinkDetails(linkId: linkId, domain: domain) { [weak self] result in
-             // Hop back to main actor for UI updates / callback
-             Task { @MainActor [weak self] in
-                 guard let self = self else { return }
-                 switch result {
-                 case .success(let linkData):
-                      Logger.info("Successfully fetched link data for ID \(linkId)")
-                      self.notifyCallback(with: linkData)
-                      
-                 case .failure(let error):
-                      // CHANGED: Instead of returning error, we assume it's not a LinkLab link
-                      // or the link is broken/expired/offline. We fall back to unrecognized.
-                      Logger.info("API request failed (Error: \(error.localizedDescription)). Treating as unrecognized link.")
-                      
-                      let fallbackData = LinkData.unrecognized(url: url)
-                      self.notifyCallback(with: fallbackData)
-                 }
-             }
+        guard let candidate = await attributionService.readPasteboardCandidate() else { return nil }
+        do {
+            guard let link = try await attributionService.resolve(candidate) else { return nil }
+            if deliver { self.deliver(link) }
+            return link
+        } catch {
+            report(error)
+            return nil
         }
     }
 
-    private func checkForDeferredDeepLink() {
-        guard deferredDeepLinkTask == nil else { return }
-        guard let installationTracker = installationTracker else {
-            Logger.error("Linklab not initialized")
+    // MARK: - Direct links
+
+    private func process(_ url: URL) {
+        let key = url.absoluteString
+        guard inFlight[key] == nil else {
+            LinklabLogger.debug("URL already in flight; ignoring duplicate \(LinklabLogger.describe(url))")
             return
         }
-        
-        if #available(macOS 12.0, *) {
-            guard self.attributionService is AttributionService else {
-                 Logger.debug("AttributionService not available or wrong type initially.")
-                return
+        guard let linkId = LinklabHost.linkId(of: url) else {
+            LinklabLogger.debug("Root path on Linklab host; delivering as unrecognized")
+            deliver(.unrecognized(url: url))
+            return
+        }
+        guard let apiService, let host = url.host?.lowercased() else {
+            onError?(.notInitialized)
+            return
+        }
+
+        LinklabLogger.debug("Resolving \(LinklabLogger.describe(url))")
+        inFlight[key] = Task { @MainActor [weak self] in
+            let result: LinkData
+            do {
+                let decoded = try await apiService.fetchLink(id: linkId, domain: host)
+                result = .resolved(from: decoded, shortLink: url.absoluteString, isDeferred: false, matchType: LinkData.MatchType.direct)
+            } catch LinkError.apiError(statusCode: 404, message: _) {
+                result = .unrecognized(url: url)
+            } catch {
+                result = .failed(url: url, message: error.localizedDescription)
             }
-        
-            if installationTracker.isFirstLaunch() {
-                 Logger.info("First launch detected. Checking for deferred deep link.")
-                 
-                 guard let attributionService = self.attributionService as? AttributionService else {
-                     Logger.error("AttributionService not available when checking for deferred deep link.")
-                     return
-                 }
-                 
-                 deferredDeepLinkTask = Task { @MainActor [weak self, attributionService] in
-                     guard let self = self else { return }
-                     defer { self.deferredDeepLinkTask = nil }
-                     do {
-                          Logger.debug("Requesting deferred deep link based on IP address...")
-                          let linkData = try await attributionService.fetchDeferredDeepLink()
-                          installationTracker.markAttributionCompleted()
-                          Logger.info("Successfully fetched deferred link data.")
-                          self.notifyCallback(with: linkData)
-                     } catch {
-                          if case LinkError.apiError(statusCode: 404, message: _) = error {
-                              installationTracker.markAttributionCompleted()
-                          }
-                          Logger.error("Failed to fetch deferred deep link: \(error.localizedDescription)")
-                          // For deferred deep links, if it fails, we usually simply don't trigger anything,
-                          // or we could trigger unrecognized if we really wanted to, but usually silence is better here
-                          // unless there is a specific URL involved (which there isn't, just IP).
-                          self.notifyCallback(with: nil, error: error)
-                     }
-                 }
+            guard let self else { return }
+            self.inFlight[key] = nil
+            self.deliver(result)
+        }
+    }
+
+    // MARK: - Deferred state machine
+
+    private func runDeferredCheckIfNeeded() {
+        guard deferredTask == nil, let store, let attributionService, let configuration else { return }
+        guard store.shouldRunDeferredCheck() else {
+            LinklabLogger.debug("Deferred check not needed (state: \(store.state.rawValue))")
+            return
+        }
+        LinklabLogger.info("Running deferred check (attempt \(store.attempts + 1)/\(DeferredLinkStore.maxAttempts))")
+        deferredTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performDeferredCheck(store: store, attribution: attributionService, configuration: configuration)
+            self.deferredTask = nil
+        }
+    }
+
+    private func performDeferredCheck(store: DeferredLinkStore, attribution: AttributionService, configuration: LinklabConfiguration) async {
+        do {
+            var link: LinkData?
+
+            if configuration.pasteboardMode == .automatic {
+                var candidate = store.pasteboardCandidate
+                if candidate == nil, !store.pasteboardChecked {
+                    store.pasteboardChecked = true // once per install, regardless of outcome
+                    candidate = await attribution.readPasteboardCandidate()
+                    store.pasteboardCandidate = candidate // kept for retries after a transient failure
+                }
+                if let candidate {
+                    link = try await attribution.resolve(candidate)
+                }
+            }
+
+            if link == nil {
+                link = try await attribution.fetchIPAttribution()
+            }
+
+            store.markDone()
+            if let link {
+                LinklabLogger.info("Deferred link found via \(link.matchType)")
+                deliver(link)
             } else {
-                 Logger.debug("Not first launch. Skipping deferred deep link check.")
+                LinklabLogger.debug("No deferred link for this install")
             }
-        } else {
-            Logger.error("macOS version too old for AttributionService.")
+        } catch {
+            let linkError = (error as? LinkError) ?? .internalError(error.localizedDescription)
+            if linkError.isTransient {
+                store.recordTransientFailure()
+                LinklabLogger.debug("Deferred check failed transiently (\(linkError.code)); attempts=\(store.attempts)")
+            } else {
+                store.markDone()
+                LinklabLogger.error("Deferred check failed definitively: \(linkError.localizedDescription)")
+            }
+            onError?(linkError)
         }
     }
 
-    /// Helper to safely call the deep link callback on the main thread.
-    private func notifyCallback(with linkData: LinkData? = nil, error: Error? = nil) {
-        if Thread.isMainThread {
-             // Prioritize returning linkData (even if it's unrecognized) over error
-             if let linkData = linkData {
-                  currentLinkData = linkData
-                  Logger.debug("Notifying callback with LinkData: id=\(linkData.id ?? "nil"), domainType=\(linkData.domainType)")
-                  deepLinkCallback?(linkData)
-             } else if let error = error {
-                  Logger.error("Notifying callback with error: \(error.localizedDescription)")
-                  deepLinkCallback?(nil)
-             }
+    // MARK: - Delivery
+
+    private func deliver(_ link: LinkData) {
+        if firstLink == nil { firstLink = link }
+        lastLink = link
+        LinklabLogger.debug("Delivering link: status=\(link.resolutionStatus) match=\(link.matchType) id=\(link.id ?? "-")")
+        if let onLink {
+            hasUndeliveredLink = false
+            onLink(link)
         } else {
+            hasUndeliveredLink = true
+        }
+    }
+
+    private func replayUndeliveredLinkIfNeeded() {
+        guard hasUndeliveredLink, let onLink, let lastLink else { return }
+        hasUndeliveredLink = false
+        onLink(lastLink)
+    }
+
+    private func report(_ error: Error) {
+        let linkError = (error as? LinkError) ?? .internalError(error.localizedDescription)
+        LinklabLogger.error(linkError.localizedDescription)
+        onError?(linkError)
+    }
+
+    // MARK: - Waiting helpers
+
+    private func waitForInitialization(timeout: TimeInterval) async {
+        guard configuration == nil else { return }
+        let id = UUID()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            initializationWaiters[id] = continuation
             Task { @MainActor [weak self] in
-                self?.notifyCallback(with: linkData, error: error)
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                self?.initializationWaiters.removeValue(forKey: id)?.resume()
             }
         }
+    }
+
+    private func resumeInitializationWaiters() {
+        let waiters = initializationWaiters
+        initializationWaiters = [:]
+        waiters.values.forEach { $0.resume() }
+    }
+
+    /// Waits for the current direct fetches and the deferred task, capped at `timeout`.
+    private func awaitInFlightWork(timeout: TimeInterval) async {
+        let tasks = Array(inFlight.values) + [deferredTask].compactMap { $0 }
+        guard !tasks.isEmpty else { return }
+        let gate = ResumeOnce()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            gate.continuation = continuation
+            Task { @MainActor in
+                for task in tasks { await task.value }
+                gate.resume()
+            }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                gate.resume()
+            }
+        }
+    }
+}
+
+@MainActor
+private final class ResumeOnce {
+    var continuation: CheckedContinuation<Void, Never>?
+    func resume() {
+        continuation?.resume()
+        continuation = nil
     }
 }
